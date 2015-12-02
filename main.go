@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/Maxtors/surisoc"
 )
@@ -16,6 +18,8 @@ var (
 	socketPath  string
 	interactive bool
 	session     *surisoc.SuricataSocket
+	signals     chan os.Signal
+	done        chan bool
 )
 
 // Initializer function to set up commandline arguments and socket session
@@ -44,32 +48,55 @@ func init() {
 	if err != nil {
 		log.Fatalf("Error: %s\n", err.Error())
 	}
+
+	// Create channels
+	signals = make(chan os.Signal, 1)
+	done = make(chan bool, 1)
+
+	// Set up the signals to listen to, SIGQUIT is used internaly to stop
+	// the current process
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 }
 
 func main() {
 	defer session.Close()
 
-	// If we are not starting an interactive session just send the command
-	if !interactive {
-		sendCommandLine(flag.Args())
-	} else {
+	// Go-Routine to handle reciving of signals
+	go func() {
+		signal := <-signals
+		log.Printf("Recived signal: %s\n", signal)
+		done <- true
+	}()
 
-		// Tell the user that an interactive session has started, and
-		// display all the available commands
-		fmt.Println(">> Entering Interactive Mode <<")
-		fmt.Println(">> Valid Commands:")
-		sendCommandLine([]string{"command-list"})
+	// Go-Routine to handle the actuall logic of this program
+	go func() {
+		// If we are not starting an interactive session just send the command
+		if !interactive {
+			sendCommandLine(flag.Args())
+			done <- true
+		} else {
 
-		for {
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print(">> ")
-			text, err := reader.ReadString('\n')
-			if err != nil {
-				log.Fatalf("Error: %s\n", err.Error())
+			// Tell the user that an interactive session has started, and
+			// display all the available commands
+			fmt.Println(">> Entering Interactive Mode <<")
+			fmt.Println(">> Valid Commands:")
+			sendCommandLine([]string{"command-list"})
+
+			for {
+				reader := bufio.NewReader(os.Stdin)
+				fmt.Print(">> ")
+				text, err := reader.ReadString('\n')
+				if err != nil {
+					log.Printf("Error: %s\n", err.Error())
+					signals <- syscall.SIGQUIT
+				}
+				sendCommandLine(strings.Split(strings.TrimSuffix(text, "\n"), " "))
 			}
-			sendCommandLine(strings.Split(strings.TrimSuffix(text, "\n"), " "))
 		}
-	}
+	}()
+
+	// Wait for a done signal
+	<-done
 }
 
 // sendCommandLine will take a slice of commands and send them to the socket
